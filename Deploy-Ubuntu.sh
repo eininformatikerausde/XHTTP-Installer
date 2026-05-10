@@ -411,7 +411,7 @@ RELAY_URL=""
 deploy_vercel() {
   info "Phase 4c — Deploying relay to Vercel..."
 
-  # Install Vercel CLI
+  # Install CLI if missing
   if ! command -v vercel &>/dev/null; then
     npm install -g vercel --silent
   fi
@@ -419,87 +419,87 @@ deploy_vercel() {
   local proj_dir="${DEPLOY_DIR}/vercel"
   mkdir -p "${proj_dir}/api"
 
-  # relay.js — Edge Function proxy
-  cat > "${proj_dir}/api/relay.js" <<'JSEOF'
+  # Edge Function
+  cat > "${proj_dir}/api/relay.js" <<'EOF'
 // Vercel Edge Function — XHTTP relay
 export const config = { runtime: 'edge' };
 
-const TARGET = process.env.TARGET_DOMAIN;
-const UPSTREAM = process.env.UPSTREAM_PROTOCOL || 'https';
-const PATH_PREFIX = process.env.RELAY_PATH || '/api';
-
 export default async function handler(req) {
+  const TARGET = process.env.TARGET_DOMAIN;
+  const PROTOCOL = process.env.UPSTREAM_PROTOCOL || 'https';
+
   if (!TARGET) {
-    return new Response('Misconfigured: TARGET_DOMAIN not set', { status: 500 });
+    return new Response("Missing TARGET_DOMAIN", { status: 500 });
   }
+
   const url = new URL(req.url);
-  const targetUrl = `${UPSTREAM}://${TARGET}${url.pathname}${url.search}`;
+  const upstreamUrl = `${PROTOCOL}://${TARGET}${url.pathname}${url.search}`;
+
   const headers = new Headers(req.headers);
-  headers.set('host', TARGET);
+  headers.set("host", TARGET);
 
-  try {
-    const upstream = await fetch(targetUrl, {
-      method: req.method,
-      headers,
-      body: ['GET','HEAD'].includes(req.method) ? undefined : req.body,
-      redirect: 'follow',
-    });
-    return new Response(upstream.body, {
-      status: upstream.status,
-      headers: upstream.headers,
-    });
-  } catch (e) {
-    return new Response('Gateway error: ' + e.message, { status: 502 });
-  }
+  const resp = await fetch(upstreamUrl, {
+    method: req.method,
+    headers,
+    body: ["GET", "HEAD"].includes(req.method) ? undefined : req.body,
+  });
+
+  return new Response(resp.body, {
+    status: resp.status,
+    headers: resp.headers,
+  });
 }
-JSEOF
+EOF
 
-  # vercel.json
+  # vercel.json (NO deprecated flags)
   cat > "${proj_dir}/vercel.json" <<EOF
 {
   "version": 2,
   "functions": {
     "api/relay.js": {
-      "maxDuration": ${VCL_MAX_DURATION:-50}
+      "maxDuration": 50
     }
   },
   "rewrites": [
-    { "source": "${PUBLIC_RELAY_PATH}(.*)", "destination": "/api/relay" }
+    {
+      "source": "${PUBLIC_RELAY_PATH}(.*)",
+      "destination": "/api/relay"
+    }
   ]
 }
 EOF
 
-  # package.json
   cat > "${proj_dir}/package.json" <<'EOF'
-{"name":"xhttp-relay","version":"1.0.0","private":true}
+{
+  "name": "xhttp-relay",
+  "version": "1.0.0",
+  "private": true
+}
 EOF
 
   cd "$proj_dir"
 
-  # Auth & deploy with retry
   export VERCEL_TOKEN="$CDN_TOKEN"
-  local attempt=0
-  while (( attempt < 3 )); do
-    attempt=$(( attempt + 1 ))
+
+  local attempt=1
+  while (( attempt <= 3 )); do
     info "Vercel deploy attempt $attempt..."
 
-    vercel project add "$PROJECT_NAME" --token "$CDN_TOKEN" --yes 2>/dev/null || true
+    # فقط یک deploy ساده (بدون env add، بدون name flag)
+    if vercel deploy --prod --yes --token "$CDN_TOKEN" 2>&1 | tee /tmp/vercel.log; then
+      RELAY_URL=$(grep -oE 'https://[^ ]+\.vercel\.app' /tmp/vercel.log | tail -1)
 
-    vercel env add TARGET_DOMAIN production <<< "${DOMAIN}:${XRAY_PORT}" --token "$CDN_TOKEN" 2>/dev/null || true
-    vercel env add UPSTREAM_PROTOCOL production <<< "https" --token "$CDN_TOKEN" 2>/dev/null || true
-    vercel env add RELAY_PATH production <<< "${RELAY_PATH}" --token "$CDN_TOKEN" 2>/dev/null || true
-
-    if vercel deploy --prod \
-        --name "$PROJECT_NAME" \
-        --token "$CDN_TOKEN" \
-        --yes 2>&1 | tee /tmp/vercel-deploy.log; then
-      RELAY_URL=$(grep -oP 'https://[^\s]+\.vercel\.app' /tmp/vercel-deploy.log | tail -1)
-      ok "Vercel deploy succeeded → $RELAY_URL"
-      return 0
+      if [[ -n "$RELAY_URL" ]]; then
+        ok "Vercel deploy succeeded → $RELAY_URL"
+        return 0
+      fi
     fi
+
     warn "Deploy failed, retrying in 5s..."
     sleep 5
+    ((attempt++))
   done
+
   die "Vercel deploy failed after 3 attempts."
 }
 
