@@ -170,12 +170,8 @@ phase_install_tools() {
     arch=$(uname -m)
     zip_name="Xray-knife-linux-64.zip"
     [[ "$arch" == "aarch64" ]] && zip_name="Xray-knife-linux-arm64-v8a.zip"
-    # Get latest version tag first
-    local latest_tag
-    latest_tag=$(curl -L "https://api.github.com/repos/lilendian0x00/xray-knife/releases/latest" | jq -r '.tag_name')
-    local dl_url="https://github.com/lilendian0x00/xray-knife/releases/download/${latest_tag}/${zip_name}"
-    # Use -L (follow redirects) without -f so redirect to githubusercontent.com works
-    if curl -L --silent --show-error "$dl_url" -o /tmp/xray-knife.zip; then
+    local dl_url="https://github.com/lilendian0x00/xray-knife/releases/latest/download/${zip_name}"
+    if curl -fsSL "$dl_url" -o /tmp/xray-knife.zip; then
       unzip -o /tmp/xray-knife.zip -d /tmp/xray-knife-tmp/ >/dev/null 2>&1
       find /tmp/xray-knife-tmp/ -name "xray-knife" -exec mv {} /usr/local/bin/xray-knife \;
       chmod +x /usr/local/bin/xray-knife
@@ -185,9 +181,6 @@ phase_install_tools() {
       warn "xray-knife download failed — E2E test will be skipped"
     fi
   else
-    ok "xray-knife ready"
-  fi
-
     ok "xray-knife ready"
   fi
 
