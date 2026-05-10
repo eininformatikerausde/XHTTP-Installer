@@ -172,7 +172,7 @@ phase_install_tools() {
     [[ "$arch" == "aarch64" ]] && zip_name="Xray-knife-linux-arm64-v8a.zip"
     # Get latest version tag first
     local latest_tag
-    latest_tag=$(curl -fsSL "https://api.github.com/repos/lilendian0x00/xray-knife/releases/latest" | jq -r '.tag_name')
+    latest_tag=$(curl -L "https://api.github.com/repos/lilendian0x00/xray-knife/releases/latest" | jq -r '.tag_name')
     local dl_url="https://github.com/lilendian0x00/xray-knife/releases/download/${latest_tag}/${zip_name}"
     # Use -L (follow redirects) without -f so redirect to githubusercontent.com works
     if curl -L --silent --show-error "$dl_url" -o /tmp/xray-knife.zip; then
