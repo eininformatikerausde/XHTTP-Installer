@@ -411,7 +411,7 @@ RELAY_URL=""
 deploy_vercel() {
   info "Phase 4c — Deploying relay to Vercel..."
 
-  # Install CLI if missing
+  # Install Vercel CLI
   if ! command -v vercel &>/dev/null; then
     npm install -g vercel --silent
   fi
@@ -419,90 +419,194 @@ deploy_vercel() {
   local proj_dir="${DEPLOY_DIR}/vercel"
   mkdir -p "${proj_dir}/api"
 
-  # Edge Function
-  cat > "${proj_dir}/api/relay.js" <<'EOF'
+  # relay.js — Edge Function proxy
+  cat > "${proj_dir}/api/relay.js" <<'JSEOF'
 // Vercel Edge Function — XHTTP relay
 export const config = { runtime: 'edge' };
 
+const TARGET = process.env.TARGET_DOMAIN;
+const UPSTREAM = process.env.UPSTREAM_PROTOCOL || 'https';
+const PATH_PREFIX = process.env.RELAY_PATH || '/api';
+
 export default async function handler(req) {
-  const TARGET = process.env.TARGET_DOMAIN;
-  const PROTOCOL = process.env.UPSTREAM_PROTOCOL || 'https';
-
   if (!TARGET) {
-    return new Response("Missing TARGET_DOMAIN", { status: 500 });
+    return new Response('Misconfigured: TARGET_DOMAIN not set', { status: 500 });
   }
-
   const url = new URL(req.url);
-  const upstreamUrl = `${PROTOCOL}://${TARGET}${url.pathname}${url.search}`;
-
+  const targetUrl = `${UPSTREAM}://${TARGET}${url.pathname}${url.search}`;
   const headers = new Headers(req.headers);
-  headers.set("host", TARGET);
+  headers.set('host', TARGET);
 
-  const resp = await fetch(upstreamUrl, {
-    method: req.method,
-    headers,
-    body: ["GET", "HEAD"].includes(req.method) ? undefined : req.body,
-  });
-
-  return new Response(resp.body, {
-    status: resp.status,
-    headers: resp.headers,
-  });
+  try {
+    const upstream = await fetch(targetUrl, {
+      method: req.method,
+      headers,
+      body: ['GET','HEAD'].includes(req.method) ? undefined : req.body,
+      redirect: 'follow',
+    });
+    return new Response(upstream.body, {
+      status: upstream.status,
+      headers: upstream.headers,
+    });
+  } catch (e) {
+    return new Response('Gateway error: ' + e.message, { status: 502 });
+  }
 }
-EOF
+JSEOF
 
-  # vercel.json (NO deprecated flags)
+  # vercel.json
   cat > "${proj_dir}/vercel.json" <<EOF
 {
   "version": 2,
   "functions": {
     "api/relay.js": {
-      "maxDuration": 50
+      "maxDuration": ${VCL_MAX_DURATION:-50}
     }
   },
   "rewrites": [
-    {
-      "source": "${PUBLIC_RELAY_PATH}(.*)",
-      "destination": "/api/relay"
-    }
+    { "source": "${PUBLIC_RELAY_PATH}(.*)", "destination": "/api/relay" }
   ]
 }
 EOF
 
+  # package.json
   cat > "${proj_dir}/package.json" <<'EOF'
-{
-  "name": "xhttp-relay",
-  "version": "1.0.0",
-  "private": true
-}
+{"name":"xhttp-relay","version":"1.0.0","private":true}
 EOF
 
   cd "$proj_dir"
 
+  # Auth & deploy with retry
   export VERCEL_TOKEN="$CDN_TOKEN"
-
-  local attempt=1
-  while (( attempt <= 3 )); do
+  local attempt=0
+  while (( attempt < 3 )); do
+    attempt=$(( attempt + 1 ))
     info "Vercel deploy attempt $attempt..."
 
-    # فقط یک deploy ساده (بدون env add، بدون name flag)
-    if vercel deploy --prod --yes --token "$CDN_TOKEN" 2>&1 | tee /tmp/vercel.log; then
-      RELAY_URL=$(grep -oE 'https://[^ ]+\.vercel\.app' /tmp/vercel.log | tail -1)
+    vercel project add "$PROJECT_NAME" --token "$CDN_TOKEN" --yes 2>/dev/null || true
 
-      if [[ -n "$RELAY_URL" ]]; then
-        ok "Vercel deploy succeeded → $RELAY_URL"
-        return 0
-      fi
+    vercel env add TARGET_DOMAIN production <<< "${DOMAIN}:${XRAY_PORT}" --token "$CDN_TOKEN" 2>/dev/null || true
+    vercel env add UPSTREAM_PROTOCOL production <<< "https" --token "$CDN_TOKEN" 2>/dev/null || true
+    vercel env add RELAY_PATH production <<< "${RELAY_PATH}" --token "$CDN_TOKEN" 2>/dev/null || true
+
+    if vercel deploy --prod \
+        --name "$PROJECT_NAME" \
+        --token "$CDN_TOKEN" \
+        --yes 2>&1 | tee /tmp/vercel-deploy.log; then
+      RELAY_URL=$(grep -oP 'https://[^\s]+\.vercel\.app' /tmp/vercel-deploy.log | tail -1)
+      ok "Vercel deploy succeeded → $RELAY_URL"
+      return 0
     fi
-
     warn "Deploy failed, retrying in 5s..."
     sleep 5
-    ((attempt++))
   done
-
   die "Vercel deploy failed after 3 attempts."
 }
 
+deploy_netlify() {
+  info "Phase 4c — Deploying relay to Netlify..."
+
+  # Install Netlify CLI
+  if ! command -v netlify &>/dev/null; then
+    npm install -g netlify-cli --silent
+  fi
+
+  local proj_dir="${DEPLOY_DIR}/netlify"
+  mkdir -p "${proj_dir}/netlify/edge-functions"
+
+  # Edge function relay
+  cat > "${proj_dir}/netlify/edge-functions/relay.js" <<JSEOF
+// Netlify Edge Function — XHTTP relay
+export default async (request, context) => {
+  const target = Deno.env.get('TARGET_DOMAIN');
+  if (!target) {
+    return new Response('Misconfigured: TARGET_DOMAIN not set', { status: 500 });
+  }
+  const url = new URL(request.url);
+  const upstream = \`https://\${target}\${url.pathname}\${url.search}\`;
+  const headers = new Headers(request.headers);
+  headers.set('host', target.split(':')[0]);
+
+  try {
+    const resp = await fetch(upstream, {
+      method: request.method,
+      headers,
+      body: ['GET','HEAD'].includes(request.method) ? undefined : request.body,
+    });
+    return new Response(resp.body, {
+      status: resp.status,
+      headers: resp.headers,
+    });
+  } catch (e) {
+    return new Response('Gateway error: ' + e.message, { status: 502 });
+  }
+};
+
+export const config = { path: '/*' };
+JSEOF
+
+  # netlify.toml
+  cat > "${proj_dir}/netlify.toml" <<EOF
+[build]
+  publish = "public"
+  edge_functions = "netlify/edge-functions"
+
+[[edge_functions]]
+  path = "${PUBLIC_RELAY_PATH}/*"
+  function = "relay"
+EOF
+
+  mkdir -p "${proj_dir}/public"
+  echo '<!DOCTYPE html><html><body>OK</body></html>' > "${proj_dir}/public/index.html"
+
+  cd "$proj_dir"
+
+  export NETLIFY_AUTH_TOKEN="$CDN_TOKEN"
+  local attempt=0
+  while (( attempt < 3 )); do
+    attempt=$(( attempt + 1 ))
+    info "Netlify deploy attempt $attempt..."
+
+    local site_id
+    site_id=$(
+      curl -fsSL \
+        -X POST "https://api.netlify.com/api/v1/sites" \
+        -H "Authorization: Bearer $CDN_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{\"name\":\"${PROJECT_NAME}\"}" \
+        2>/dev/null | jq -r '.id // empty'
+    )
+
+    if [[ -z "$site_id" ]]; then
+      # duplicate name — randomise
+      PROJECT_NAME="relay-$(head -c4 /dev/urandom | xxd -p)"
+      warn "Name taken, retrying as $PROJECT_NAME..."
+      continue
+    fi
+
+    # Set env var
+    curl -fsSL \
+      -X POST "https://api.netlify.com/api/v1/sites/${site_id}/env" \
+      -H "Authorization: Bearer $CDN_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "{\"key\":\"TARGET_DOMAIN\",\"values\":[{\"value\":\"${DOMAIN}:${XRAY_PORT}\",\"context\":\"production\"}]}" \
+      >/dev/null 2>&1 || true
+
+    if netlify deploy \
+        --prod \
+        --site "$site_id" \
+        --auth "$CDN_TOKEN" \
+        --dir public 2>&1 | tee /tmp/netlify-deploy.log; then
+      RELAY_URL="${PROJECT_NAME}.netlify.app"
+      RELAY_URL="https://${PROJECT_NAME}.netlify.app"
+      ok "Netlify deploy succeeded → $RELAY_URL"
+      return 0
+    fi
+    warn "Deploy failed, retrying in 5s..."
+    sleep 5
+  done
+  die "Netlify deploy failed after 3 attempts."
+}
 deploy_netlify() {
   info "Phase 4c — Deploying relay to Netlify..."
 
