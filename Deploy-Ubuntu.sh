@@ -188,12 +188,6 @@ phase_install_tools() {
     ok "xray-knife ready"
   fi
 
-    ok "xray-knife ready"
-  fi
-
-    ok "xray-knife ready"
-  fi
-
   ok "Phase 2 done."
 }
 
