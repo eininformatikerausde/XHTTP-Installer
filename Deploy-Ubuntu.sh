@@ -247,7 +247,7 @@ phase_collect_inputs() {
     echo "Get Netlify token: https://app.netlify.com/user/applications#personal-access-tokens"
   fi
   while true; do
-    read -rsp "${PLATFORM^} API Token: " CDN_TOKEN; echo
+    read -rp "${PLATFORM^} API Token: " CDN_TOKEN; echo
     [[ -n "$CDN_TOKEN" ]] && break
     warn "Token cannot be empty."
   done
